@@ -1,0 +1,263 @@
+/* Custom CSS Styles for Digital Investor Onboarding System - Premium Banking & Fintech Aesthetic */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --navy-deep: #071527;
+    --navy-primary: #0f2b48;
+    --navy-hover: #16385c;
+    --navy-light: #1e4570;
+    --accent-gold: #f59e0b;
+    --accent-gold-hover: #d97706;
+    --accent-blue: #2563eb;
+    --bg-page: #f8fafc;
+    --card-border: #e2e8f0;
+    --card-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
+    --card-shadow-hover: 0 12px 32px rgba(15, 23, 42, 0.12);
+    --font-heading: 'Outfit', -apple-system, sans-serif;
+    --font-body: 'Inter', -apple-system, sans-serif;
+}
+
+body {
+    font-family: var(--font-body);
+    background-color: var(--bg-page);
+    color: #1e293b;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6, .navbar-brand {
+    font-family: var(--font-heading);
+}
+
+/* Navbar Premium Styling */
+.navbar-custom {
+    background: linear-gradient(135deg, #071527 0%, #0f2b48 100%);
+    box-shadow: 0 4px 20px rgba(7, 21, 39, 0.25);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.navbar-brand {
+    font-weight: 800;
+    letter-spacing: 0.2px;
+}
+
+.nav-link {
+    font-size: 0.92rem;
+    font-weight: 500;
+    padding: 0.5rem 0.9rem !important;
+    transition: all 0.2s ease;
+    border-radius: 6px;
+}
+
+.nav-link:hover {
+    color: var(--accent-gold) !important;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.nav-link.active {
+    color: #ffffff !important;
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Hero Banner */
+.hero-banner {
+    background: linear-gradient(135deg, rgba(7, 21, 39, 0.94) 0%, rgba(15, 43, 72, 0.9) 100%), 
+                url('https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?auto=format&fit=crop&w=1600&q=80') center/cover no-repeat;
+    color: #ffffff;
+    padding: 95px 0 85px;
+    position: relative;
+    border-bottom: 4px solid var(--accent-gold);
+}
+
+.hero-title {
+    font-size: 3rem;
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+    font-size: 1.25rem;
+    color: #94a3b8;
+    max-width: 780px;
+    margin: 22px auto 35px;
+    line-height: 1.6;
+}
+
+/* Cards & Containers */
+.card {
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    background-color: #ffffff;
+}
+
+.card-hover:hover {
+    transform: translateY(-5px);
+    box-shadow: var(--card-shadow-hover);
+    border-color: #cbd5e1;
+}
+
+.card-header {
+    background-color: #ffffff;
+    border-bottom: 1px solid #f1f5f9;
+    font-weight: 700;
+    padding: 18px 24px;
+    border-top-left-radius: 14px !important;
+    border-top-right-radius: 14px !important;
+}
+
+/* Stepper Component */
+.stepper-wrapper {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 25px;
+    position: relative;
+}
+
+.stepper-item {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+}
+
+.stepper-item::before {
+    position: absolute;
+    content: "";
+    border-bottom: 3px solid #cbd5e1;
+    width: 100%;
+    top: 22px;
+    left: -50%;
+    z-index: 1;
+    transition: border-color 0.4s ease;
+}
+
+.stepper-item:first-child::before {
+    content: none;
+}
+
+.stepper-item .step-counter {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: #e2e8f0;
+    color: #64748b;
+    font-weight: 700;
+    font-size: 1rem;
+    margin-bottom: 10px;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.stepper-item.completed .step-counter {
+    background-color: #10b981;
+    color: #ffffff;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+
+.stepper-item.active .step-counter {
+    background-color: var(--navy-primary);
+    color: #ffffff;
+    box-shadow: 0 0 0 4px rgba(15, 43, 72, 0.25);
+}
+
+.stepper-item.completed::before {
+    border-bottom-color: #10b981;
+}
+
+.step-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #64748b;
+    text-align: center;
+}
+
+.stepper-item.active .step-name {
+    color: var(--navy-primary);
+    font-weight: 700;
+}
+
+.stepper-item.completed .step-name {
+    color: #059669;
+}
+
+/* Canvas eSign Pad */
+.signature-pad-container {
+    border: 2px dashed #0f2b48;
+    border-radius: 12px;
+    background-color: #ffffff;
+    background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+    background-size: 16px 16px;
+    padding: 14px;
+    text-align: center;
+    position: relative;
+}
+
+canvas#signatureCanvas {
+    background-color: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    cursor: crosshair;
+    touch-action: none;
+    width: 100%;
+    max-width: 620px;
+    height: 210px;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+/* Buttons */
+.btn-primary {
+    background-color: var(--navy-primary);
+    border-color: var(--navy-primary);
+}
+.btn-primary:hover, .btn-primary:focus {
+    background-color: var(--navy-hover);
+    border-color: var(--navy-hover);
+}
+
+.btn-warning {
+    background-color: var(--accent-gold);
+    border-color: var(--accent-gold);
+    color: #0f172a;
+}
+.btn-warning:hover {
+    background-color: var(--accent-gold-hover);
+    border-color: var(--accent-gold-hover);
+    color: #0f172a;
+}
+
+/* Status Badges */
+.fs-7 { font-size: 0.84rem; }
+.fs-8 { font-size: 0.78rem; }
+
+/* Academic Disclaimer Ribbon */
+.disclaimer-ribbon {
+    background-color: #fffbeb;
+    color: #92400e;
+    border-left: 5px solid #f59e0b;
+    padding: 14px 18px;
+    border-radius: 8px;
+    font-size: 0.92rem;
+    margin-bottom: 22px;
+}
+
+/* Footer */
+footer {
+    margin-top: auto;
+    background-color: #071527;
+    color: #94a3b8;
+    padding: 32px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
