@@ -135,7 +135,7 @@ require_once __DIR__ . '/includes/header.php';
                         <th class="bg-light">Occupation</th>
                         <td><?php echo e($profile['occupation'] ?? 'N/A'); ?></td>
                         <th class="bg-light">Primary ID (<?php echo e($profile['id_type'] ?? $kyc['id_type'] ?? 'Aadhaar'); ?>)</th>
-                        <td><strong class="font-monospace text-primary"><?php echo e($profile['id_number'] ?? $kyc['id_number'] ?? 'N/A'); ?></strong></td>
+                        <td><strong class="font-monospace text-primary"><?php echo e(maskAadhaarNumber($profile['id_number'] ?? $kyc['id_number'] ?? '', $profile['id_type'] ?? $kyc['id_type'] ?? 'Aadhaar')); ?></strong></td>
                     </tr>
                 </tbody>
             </table>
@@ -180,35 +180,6 @@ require_once __DIR__ . '/includes/header.php';
                 </div>
             </div>
         <?php endif; ?>
-
-        <!-- 4. Digital Documents Vault Table -->
-        <h5 class="fw-bold text-dark mb-3"><i class="fas fa-folder text-warning me-2"></i>4. Digitized Supporting Documents Repository</h5>
-        <div class="table-responsive mb-4">
-            <table class="table table-sm table-hover align-middle border">
-                <thead class="table-light fs-7 text-uppercase">
-                    <tr>
-                        <th class="ps-3">Doc Type</th>
-                        <th>Document Title</th>
-                        <th>Upload Date</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($documents)): ?>
-                        <tr><td colspan="4" class="text-center text-muted py-3">No uploaded digital documents.</td></tr>
-                    <?php else: ?>
-                        <?php foreach ($documents as $doc): ?>
-                            <tr>
-                                <td class="ps-3"><span class="badge bg-light text-dark border"><?php echo e($doc['doc_type']); ?></span></td>
-                                <td><strong><?php echo e($doc['doc_name']); ?></strong></td>
-                                <td><small class="text-muted"><?php echo e($doc['created_at']); ?></small></td>
-                                <td><?php echo renderStatusBadge($doc['status']); ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
 
         <!-- Dossier Footer Disclaimer -->
         <div class="border-top pt-3 text-center text-muted fs-8">

@@ -2,14 +2,52 @@
 // dashboard.php
 // Investor Dashboard
 
-$pageTitle = "Investor Dashboard - Digital Investor Onboarding";
-require_once __DIR__ . '/includes/header.php';
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/config/project_info.php';
+require_once __DIR__ . '/includes/csrf.php';
+require_once __DIR__ . '/includes/functions.php';
+require_once __DIR__ . '/includes/auth_check.php';
+
 requireRole('investor');
 
-$userId = $_SESSION['user_id'];
+$userId = (int)$_SESSION['user_id'];
 
 // Refresh application status
 refreshApplicationStatus($pdo, $userId);
+
+// Handle Request eKYC POST
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_ekyc'])) {
+    verifyCSRFPost();
+
+    // Fetch Profile or User email
+    $stmtProf = $pdo->prepare("SELECT email, full_name FROM investor_profiles WHERE user_id = ?");
+    $stmtProf->execute([$userId]);
+    $prof = $stmtProf->fetch();
+    $recipientEmail = !empty($prof['email']) ? trim($prof['email']) : trim($_SESSION['email'] ?? '');
+
+    if (empty($recipientEmail) || !filter_var($recipientEmail, FILTER_VALIDATE_EMAIL)) {
+        setFlash('danger', 'Unable to determine registered email address. Please update your profile.');
+    } else {
+        $res = createEKYCRequest($pdo, $userId, $recipientEmail);
+        if ($res['success']) {
+            $msg = 'A unique, secure eKYC link has been dispatched to your registered email (<strong>' . htmlspecialchars($recipientEmail) . '</strong>). Please check your email inbox to upload your identity document.';
+            if (!empty($res['token'])) {
+                $msg .= ' <div class="mt-2"><a href="/digital-investor/investor/view_email.php?type=ekyc&token=' . urlencode($res['token']) . '" class="btn btn-sm btn-outline-primary fw-semibold"><i class="fas fa-inbox me-1"></i> Open Dispatched Email (Inbox Simulator)</a></div>';
+            }
+            setFlash('success', $msg);
+        } else {
+            setFlash('danger', 'Failed to dispatch eKYC email request: ' . htmlspecialchars($res['error'] ?? 'Unknown error.'));
+        }
+    }
+    header("Location: /digital-investor/dashboard.php");
+    exit;
+}
+
+$pageTitle = "Investor Dashboard - Digital Investor Onboarding";
+require_once __DIR__ . '/includes/header.php';
 
 // Fetch Application
 $app = getOrInitApplication($pdo, $userId);
@@ -23,6 +61,9 @@ $profile = $stmtProf->fetch();
 $stmtKyc = $pdo->prepare("SELECT * FROM kyc_verification WHERE user_id = ?");
 $stmtKyc->execute([$userId]);
 $kyc = $stmtKyc->fetch();
+
+// Fetch latest eKYC Request
+$latestKycReq = getLatestEKYCRequestForUser($pdo, $userId);
 
 // Fetch Documents
 $stmtDocs = $pdo->prepare("SELECT * FROM documents WHERE user_id = ? ORDER BY created_at DESC");
@@ -146,25 +187,27 @@ $progressPercent = ($stepsCompleted / 4) * 100;
                             <i class="fas fa-id-card fs-4"></i>
                         </div>
                         <?php if (($kyc['status'] ?? '') === 'Verified'): ?>
-                            <span class="badge bg-success"><i class="fas fa-check-circle me-1"></i> eKYC Verified</span>
+                            <span class="badge bg-success"><i class="fas fa-check-circle me-1"></i> Verified</span>
+                        <?php elseif (($kyc['status'] ?? '') === 'Submitted'): ?>
+                            <span class="badge bg-warning text-dark"><i class="fas fa-clock me-1"></i> Under Review</span>
+                        <?php elseif (($kyc['status'] ?? '') === 'Rejected'): ?>
+                            <span class="badge bg-danger"><i class="fas fa-times-circle me-1"></i> Rejected</span>
                         <?php else: ?>
-                            <?php echo renderStatusBadge($kyc['status'] ?? 'Pending'); ?>
+                            <span class="badge bg-secondary">Link Required</span>
                         <?php endif; ?>
                     </div>
-                    <h5 class="fw-bold mb-1">Demo eKYC</h5>
-                    <p class="text-muted small flex-grow-1 mb-2">Aadhaar document verification & automatic photo extraction.</p>
+                    <h5 class="fw-bold mb-1">eKYC Verification</h5>
+                    <p class="text-muted small flex-grow-1 mb-2">View saved identity verification details & document status.</p>
                     
                     <?php if (!empty($kyc['photo_path']) && file_exists(__DIR__ . '/' . $kyc['photo_path'])): ?>
                         <div class="bg-light p-2 rounded text-center mb-2 border">
-                            <img src="/digital-investor/<?php echo e($kyc['photo_path']); ?>" alt="Aadhaar Verified Photo" style="max-height: 55px;" class="rounded border bg-white">
-                            <small class="d-block text-muted fs-8 mt-1">Aadhaar Verified Photo</small>
+                            <img src="/digital-investor/<?php echo e($kyc['photo_path']); ?>?v=<?php echo time(); ?>" alt="Aadhaar Verified Photo" style="max-height: 55px;" class="rounded border bg-white">
+                            <small class="d-block text-muted fs-8 mt-1">Verified Photo Portrait</small>
                         </div>
-                    <?php elseif (!empty($kyc['document_path'])): ?>
-                        <small class="text-muted d-block text-center mb-2 fs-8"><i class="fas fa-exclamation-triangle text-warning me-1"></i> Unable to extract portrait from this document</small>
                     <?php endif; ?>
 
-                    <a href="/digital-investor/investor/ekyc.php" class="btn btn-outline-info text-dark w-100 mt-auto fw-semibold rounded-3">
-                        <?php echo isset($kyc['status']) && $kyc['status'] !== 'Pending' ? '<i class="fas fa-eye me-1"></i> View Demo eKYC' : '<i class="fas fa-upload me-1"></i> Submit Demo eKYC'; ?>
+                    <a href="/digital-investor/investor/ekyc.php" class="btn btn-primary w-100 mt-auto fw-semibold rounded-3 shadow-sm">
+                        <i class="fas fa-id-card me-1"></i> View eKYC Details
                     </a>
                 </div>
             </div>

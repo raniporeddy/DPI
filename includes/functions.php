@@ -149,6 +149,68 @@ function getOrInitApplication($pdo, $userId) {
 }
 
 /**
+ * Check mandatory document status for an investor:
+ * 1. Passport-size Photo (JPG, JPEG, PNG)
+ * 2. Aadhaar Card (JPG, JPEG, PNG, PDF)
+ * 3. ID Proof (JPG, JPEG, PNG, PDF)
+ */
+function checkUserRequiredDocuments($pdo, $userId) {
+    $requiredKeys = ['Passport-size Photo', 'Aadhaar Card', 'ID Proof'];
+
+    $stmt = $pdo->prepare("SELECT * FROM documents WHERE user_id = ? ORDER BY id DESC");
+    $stmt->execute([$userId]);
+    $docs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $latestDocs = [];
+    foreach ($docs as $doc) {
+        $type = $doc['doc_type'];
+        if (in_array($type, $requiredKeys) && !isset($latestDocs[$type])) {
+            $latestDocs[$type] = $doc;
+        }
+    }
+
+    // Fallback detection for legacy records:
+    // If Aadhaar Card not directly uploaded, check if doc_type has 'Aadhaar' or doc_name contains 'Aadhaar'
+    if (!isset($latestDocs['Aadhaar Card'])) {
+        foreach ($docs as $doc) {
+            if (stripos($doc['doc_type'], 'Aadhaar') !== false || stripos($doc['doc_name'], 'Aadhaar') !== false) {
+                $latestDocs['Aadhaar Card'] = $doc;
+                break;
+            }
+        }
+    }
+
+    // If ID Proof not directly uploaded, check if an Identity Proof document exists (not already mapped to Aadhaar)
+    if (!isset($latestDocs['ID Proof'])) {
+        foreach ($docs as $doc) {
+            if ($doc['doc_type'] === 'Identity Proof' && (empty($latestDocs['Aadhaar Card']) || $latestDocs['Aadhaar Card']['id'] !== $doc['id'])) {
+                $latestDocs['ID Proof'] = $doc;
+                break;
+            }
+        }
+    }
+
+    $uploaded = [];
+    $missing = [];
+    foreach ($requiredKeys as $key) {
+        if (isset($latestDocs[$key])) {
+            $uploaded[$key] = $latestDocs[$key];
+        } else {
+            $missing[] = $key;
+        }
+    }
+
+    return [
+        'all_completed' => empty($missing),
+        'uploaded' => $uploaded,
+        'missing' => $missing,
+        'latest_docs' => $latestDocs,
+        'count_uploaded' => count($uploaded),
+        'total_required' => count($requiredKeys)
+    ];
+}
+
+/**
  * Recalculate investor onboarding progress status
  */
 function refreshApplicationStatus($pdo, $userId) {
@@ -159,16 +221,14 @@ function refreshApplicationStatus($pdo, $userId) {
     $profileCompleted = (!empty($prof['full_name']) && !empty($prof['mobile']) && !empty($prof['address']) && !empty($prof['id_number'])) ? 1 : 0;
 
     // 2. Check eKYC
-    $stmtKyc = $pdo->prepare("SELECT status FROM kyc_verification WHERE user_id = ?");
+    $stmtKyc = $pdo->prepare("SELECT status, document_path FROM kyc_verification WHERE user_id = ?");
     $stmtKyc->execute([$userId]);
     $kyc = $stmtKyc->fetch();
-    $kycCompleted = ($kyc && in_array($kyc['status'], ['Submitted', 'Verified'])) ? 1 : 0;
+    $kycCompleted = ($kyc && (in_array($kyc['status'], ['Submitted', 'Verified']) || ($kyc['status'] === 'Pending' && !empty($kyc['document_path'])))) ? 1 : 0;
 
-    // 3. Check Documents
-    $stmtDocs = $pdo->prepare("SELECT COUNT(*) as doc_count FROM documents WHERE user_id = ?");
-    $stmtDocs->execute([$userId]);
-    $docCount = $stmtDocs->fetchColumn();
-    $docsCompleted = ($docCount >= 1) ? 1 : 0;
+    // 3. Check Documents (All 3 mandatory documents: Passport-size Photo, Aadhaar Card, ID Proof)
+    $reqDocs = checkUserRequiredDocuments($pdo, $userId);
+    $docsCompleted = $reqDocs['all_completed'] ? 1 : 0;
 
     // 4. Check eSign (Check both direct canvas signature and agreement eSign requests)
     $stmtSign = $pdo->prepare("SELECT status FROM esignatures WHERE user_id = ?");
@@ -187,51 +247,108 @@ function refreshApplicationStatus($pdo, $userId) {
 }
 
 /**
- * Validate and move uploaded file securely
+ * Validate and move uploaded file securely.
+ * Returns detailed, user-friendly error messages for each failure case.
+ *
+ * Validation order:
+ *  1. Presence check (empty / missing $_FILES entry)
+ *  2. PHP upload error code (UPLOAD_ERR_* constants)
+ *  3. Extension check — filename string only, safe before is_uploaded_file
+ *  4. Size check     — superglobal integer, safe before is_uploaded_file
+ *  5. Zero-byte guard — superglobal integer
+ *  6. is_uploaded_file() — security guard before any filesystem I/O
+ *  7. MIME-type check — reads file content, needs real file on disk
+ *  8. Directory writable check
+ *  9. move_uploaded_file()
  */
 function handleSecureFileUpload($fileInput, $targetDir, $allowedExtensions = ['jpg', 'jpeg', 'png', 'pdf'], $maxSizeBytes = 5242880) {
-    if (!isset($fileInput) || $fileInput['error'] !== UPLOAD_ERR_OK) {
-        return ['success' => false, 'error' => 'File upload failed or no file selected.'];
+    // 1. Presence check
+    if (empty($fileInput) || !is_array($fileInput) || !isset($fileInput['error'])) {
+        return ['success' => false, 'error' => 'No file was received by the server. Please select a file and try again.'];
     }
 
-    if ($fileInput['size'] > $maxSizeBytes) {
-        return ['success' => false, 'error' => 'File size exceeds maximum allowed limit of ' . ($maxSizeBytes / (1024 * 1024)) . 'MB.'];
+    // 2. PHP upload error codes → specific user-friendly messages
+    $uploadErrMessages = [
+        UPLOAD_ERR_OK         => '',
+        UPLOAD_ERR_INI_SIZE   => 'The file is too large. Maximum allowed upload size on this server is ' . ini_get('upload_max_filesize') . '.',
+        UPLOAD_ERR_FORM_SIZE  => 'The file exceeds the maximum size allowed by this form (5 MB).',
+        UPLOAD_ERR_PARTIAL    => 'The file was only partially uploaded. Please check your connection and try again.',
+        UPLOAD_ERR_NO_FILE    => 'No file was selected. Please choose your Aadhaar document and click Submit.',
+        UPLOAD_ERR_NO_TMP_DIR => 'Server configuration error: temporary upload directory is missing. Please contact support.',
+        UPLOAD_ERR_CANT_WRITE => 'Server error: failed to write the uploaded file to disk. Please contact support.',
+        UPLOAD_ERR_EXTENSION  => 'A server extension stopped the upload. Please contact support.',
+    ];
+    $errCode = (int) $fileInput['error'];
+    if ($errCode !== UPLOAD_ERR_OK) {
+        $msg = $uploadErrMessages[$errCode]
+            ?? 'File upload failed (error code ' . $errCode . '). Please try again.';
+        return ['success' => false, 'error' => $msg];
     }
 
+    // 3. Extension validation (reads only filename string — safe before is_uploaded_file)
     $fileExt = strtolower(pathinfo($fileInput['name'], PATHINFO_EXTENSION));
-    if (!in_array($fileExt, $allowedExtensions)) {
-        return ['success' => false, 'error' => 'Invalid file format. Allowed formats: ' . implode(', ', $allowedExtensions)];
+    if (!in_array($fileExt, $allowedExtensions, true)) {
+        return ['success' => false, 'error' =>
+            'Invalid file format “' . htmlspecialchars($fileExt, ENT_QUOTES) . '”. '
+            . 'Accepted formats: ' . strtoupper(implode(', ', $allowedExtensions)) . '.'
+        ];
     }
 
-    // Verify MIME type
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    // 4. Application file-size limit (reads only superglobal integer — safe before is_uploaded_file)
+    if ($fileInput['size'] > $maxSizeBytes) {
+        return ['success' => false, 'error' =>
+            'File size (' . number_format($fileInput['size'] / (1024 * 1024), 2) . ' MB) '
+            . 'exceeds the maximum allowed limit of ' . ($maxSizeBytes / (1024 * 1024)) . ' MB.'
+        ];
+    }
+
+    // 5. Zero-byte guard (reads only superglobal integer)
+    if ($fileInput['size'] === 0) {
+        return ['success' => false, 'error' => 'The uploaded file is empty (0 bytes). Please select a valid document.'];
+    }
+
+    // 6. is_uploaded_file() — security guard; prevents path-injection attacks.
+    //    Runs before any filesystem I/O (MIME reading, move_uploaded_file).
+    if (!is_uploaded_file($fileInput['tmp_name'])) {
+        return ['success' => false, 'error' => 'Security check failed: the file was not uploaded via HTTP POST.'];
+    }
+
+    // 7. MIME-type check (reads actual file content — requires real tmp file on disk)
+    $finfo    = finfo_open(FILEINFO_MIME_TYPE);
     $mimeType = finfo_file($finfo, $fileInput['tmp_name']);
     finfo_close($finfo);
-
     $allowedMimes = ['image/jpeg', 'image/png', 'application/pdf'];
-    if (!in_array($mimeType, $allowedMimes)) {
-        return ['success' => false, 'error' => 'Security warning: Invalid file content type.'];
+    if (!in_array($mimeType, $allowedMimes, true)) {
+        return ['success' => false, 'error' =>
+            'Security check failed: file content does not match an accepted image or PDF '
+            . '(detected: ' . htmlspecialchars($mimeType, ENT_QUOTES) . '). '
+            . 'Please upload a genuine Aadhaar card image or PDF.'
+        ];
     }
 
-    // Ensure target directory exists
-    if (!file_exists($targetDir)) {
-        mkdir($targetDir, 0777, true);
+    // 8. Target directory
+    if (!is_dir($targetDir)) {
+        if (!mkdir($targetDir, 0755, true)) {
+            return ['success' => false, 'error' => 'Server error: could not create upload directory. Please contact support.'];
+        }
+    }
+    if (!is_writable($targetDir)) {
+        return ['success' => false, 'error' => 'Server error: upload directory is not writable. Please contact support.'];
     }
 
+    // 9. Move to permanent location
     $newFilename = uniqid('doc_', true) . '.' . $fileExt;
-    $targetPath = rtrim($targetDir, '/\\') . DIRECTORY_SEPARATOR . $newFilename;
-
+    $targetPath  = rtrim($targetDir, '/\\') . DIRECTORY_SEPARATOR . $newFilename;
     if (move_uploaded_file($fileInput['tmp_name'], $targetPath)) {
         return [
-            'success' => true,
-            'file_name' => $fileInput['name'],
-            'file_path' => str_replace('\\', '/', $targetPath),
+            'success'       => true,
+            'file_name'     => $fileInput['name'],
+            'file_path'     => str_replace('\\', '/', $targetPath),
             'relative_path' => str_replace('\\', '/', str_replace(dirname(__DIR__), '', $targetPath)),
-            'file_size' => $fileInput['size']
+            'file_size'     => $fileInput['size'],
         ];
-    } else {
-        return ['success' => false, 'error' => 'Failed to save uploaded file to destination.'];
     }
+    return ['success' => false, 'error' => 'Failed to move uploaded file to destination. Ensure the upload directory is writable.'];
 }
 
 /**
@@ -239,7 +356,7 @@ function handleSecureFileUpload($fileInput, $targetDir, $allowedExtensions = ['j
  * 1. Extract face photo using local OpenCV (YuNet/Haar Cascades).
  * 2. Extract OCR text (Name, DOB, ID Number, Mobile, Address) using local EasyOCR.
  */
-function processKYCDocumentDetailed($uploadedFilePath, $targetPhotoDir = '', $userId = 0) {
+function processKYCDocumentDetailed($uploadedFilePath, $targetPhotoDir = '', $userId = 0, $submittedFullName = '') {
     if (empty($uploadedFilePath) || !file_exists($uploadedFilePath)) {
         return ['success' => false, 'error' => 'Uploaded document file not found on server.'];
     }
@@ -261,7 +378,7 @@ function processKYCDocumentDetailed($uploadedFilePath, $targetPhotoDir = '', $us
             'python3'
         ];
         foreach ($pyCmds as $pyExe) {
-            $cmd = '"' . $pyExe . '" "' . $pyScript . '" "' . $uploadedFilePath . '" "' . $targetPhotoDir . '" ' . (int)$userId;
+            $cmd = '"' . $pyExe . '" "' . $pyScript . '" "' . $uploadedFilePath . '" "' . $targetPhotoDir . '" ' . (int)$userId . ' "' . addslashes($submittedFullName) . '"';
             $output = [];
             $returnVar = -1;
             @exec($cmd, $output, $returnVar);
@@ -285,12 +402,16 @@ function processKYCDocumentDetailed($uploadedFilePath, $targetPhotoDir = '', $us
     return [
         'success' => $fallbackPhoto['success'],
         'photo_path' => $fallbackPhoto['photo_path'] ?? null,
-        'full_name' => null,
+        'ocr_name' => null,
         'dob' => null,
         'dob_formatted' => null,
         'id_number' => null,
-        'mobile' => 'Phone number not available on document',
+        'gender' => null,
+        'ocr_gender' => null,
+        'mobile' => null,
+        'ocr_mobile' => null,
         'address' => null,
+        'ocr_address' => null,
         'error' => $fallbackPhoto['error'] ?? null
     ];
 }
@@ -668,7 +789,7 @@ function getAllESignRequests($pdo) {
 /**
  * Create eKYC request record and dispatch email
  */
-function createEKYCRequest($pdo, $userId, $recipientEmail) {
+function createEKYCRequest($pdo, $userId, $recipientEmail, $validityHours = 24) {
     require_once __DIR__ . '/email_helper.php';
     require_once __DIR__ . '/notification_helper.php';
 
@@ -681,21 +802,23 @@ function createEKYCRequest($pdo, $userId, $recipientEmail) {
         return ['success' => false, 'error' => 'Please enter a valid recipient email address.'];
     }
 
-    $token = bin2hex(random_bytes(24));
+    // 64-character secure random token
+    $token = bin2hex(random_bytes(32));
+    $expiresAt = date('Y-m-d H:i:s', time() + ($validityHours * 3600));
 
     try {
         $stmtIns = $pdo->prepare("
-            INSERT INTO ekyc_requests (user_id, recipient_email, token, status, created_at)
-            VALUES (?, ?, ?, 'Sent', NOW())
+            INSERT INTO ekyc_requests (user_id, recipient_email, token, status, expires_at, created_at)
+            VALUES (?, ?, ?, 'Sent', ?, NOW())
         ");
-        $stmtIns->execute([$userId, $recipientEmail, $token]);
+        $stmtIns->execute([$userId, $recipientEmail, $token, $expiresAt]);
         $requestId = $pdo->lastInsertId();
 
         $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
         $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $submissionUrl = $protocol . '://' . $host . '/digital-investor/ekyc_submission.php?token=' . $token;
 
-        $emailRes = sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl);
+        $emailRes = sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl, $expiresAt);
 
         if (isset($emailRes['success']) && $emailRes['success'] === false) {
             $stmtDel = $pdo->prepare("DELETE FROM ekyc_requests WHERE id = ?");
@@ -707,12 +830,13 @@ function createEKYCRequest($pdo, $userId, $recipientEmail) {
             ];
         }
 
-        createAdminNotification($pdo, $userId, 'ekyc_request_sent', "eKYC submission email sent to " . $recipientEmail . ".");
+        createAdminNotification($pdo, $userId, 'ekyc_request_sent', "eKYC verification request email sent to " . $recipientEmail . " (Expires: " . date('M d, H:i', strtotime($expiresAt)) . ").");
 
         return [
             'success' => true,
             'request_id' => $requestId,
             'token' => $token,
+            'expires_at' => $expiresAt,
             'submission_url' => $submissionUrl,
             'email_res' => $emailRes
         ];
@@ -721,6 +845,20 @@ function createEKYCRequest($pdo, $userId, $recipientEmail) {
         error_log("createEKYCRequest error: " . $e->getMessage());
         return ['success' => false, 'error' => 'Database error creating eKYC request.'];
     }
+}
+
+/**
+ * Fetch latest eKYC request for a specific user
+ */
+function getLatestEKYCRequestForUser($pdo, $userId) {
+    $stmt = $pdo->prepare("
+        SELECT * FROM ekyc_requests 
+        WHERE user_id = ? 
+        ORDER BY id DESC 
+        LIMIT 1
+    ");
+    $stmt->execute([$userId]);
+    return $stmt->fetch();
 }
 
 /**
@@ -738,6 +876,127 @@ function getEKYCRequestByToken($pdo, $token) {
     $stmt->execute([$token]);
     return $stmt->fetch();
 }
+
+/**
+ * Securely save OCR-extracted identity document details into a structured XML file.
+ * Stored in storage/ekyc_xml/ with access restricted to prevent direct web viewing.
+ *
+ * @param int $userId Investor User ID
+ * @param array $details Associative array containing: full_name, dob, gender, id_number, address, mobile, photo_path
+ * @return string Relative path to saved XML file
+ */
+function saveIdentityDocumentXml(int $userId, array $details): string {
+    $projectRoot = dirname(__DIR__);
+    $xmlDir = $projectRoot . '/storage/ekyc_xml';
+
+    if (!is_dir($xmlDir)) {
+        mkdir($xmlDir, 0750, true);
+        // Protect directory from direct HTTP access
+        $htaccessContent = "<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n    Deny from all\n</IfModule>\n";
+        file_put_contents($xmlDir . '/.htaccess', $htaccessContent);
+        file_put_contents($xmlDir . '/index.html', '');
+    }
+
+    $fileName = 'investor_' . (int)$userId . '.xml';
+    $xmlFullPath = $xmlDir . '/' . $fileName;
+    $relativeXmlPath = 'storage/ekyc_xml/' . $fileName;
+
+    $dom = new DOMDocument('1.0', 'UTF-8');
+    $dom->formatOutput = true;
+
+    $root = $dom->createElement('IdentityDocument');
+    $dom->appendChild($root);
+
+    // Clean inputs: strip out any raw entity codes like &#xA;, &#xA0;, &nbsp; or unneeded carriage returns
+    $cleanVal = function($val) {
+        $str = trim((string)$val);
+        $str = str_replace(["&#xA;", "&#xa;", "&#xA0;", "&#xa0;", "&nbsp;", "\r"], [" ", " ", " ", " ", " ", ""], $str);
+        $str = preg_replace('/\s+/', ' ', $str);
+        return trim($str);
+    };
+
+    $fields = [
+        'FullName'       => $cleanVal($details['full_name'] ?? $details['ocr_name'] ?? ''),
+        'DateOfBirth'    => $cleanVal($details['dob'] ?? $details['ocr_dob'] ?? ''),
+        'Gender'         => $cleanVal($details['gender'] ?? $details['ocr_gender'] ?? ''),
+        'Address'        => $cleanVal($details['address'] ?? $details['ocr_address'] ?? ''),
+        'MobileNumber'   => $cleanVal($details['mobile'] ?? $details['mobile_number'] ?? $details['ocr_mobile'] ?? ''),
+        'IDNumber'       => $cleanVal($details['id_number'] ?? $details['ocr_id_number'] ?? ''),
+        'PhotographPath' => $cleanVal($details['photo_path'] ?? $details['photograph_path'] ?? '')
+    ];
+
+    foreach ($fields as $key => $val) {
+        $node = $dom->createElement($key);
+        $node->appendChild($dom->createTextNode($val));
+        $root->appendChild($node);
+    }
+
+    $dom->save($xmlFullPath);
+    return $relativeXmlPath;
+}
+
+/**
+ * Read and parse an investor's Identity Document XML file securely using PHP SimpleXML.
+ * Implements XXE prevention (disables entity loader and external DTDs).
+ *
+ * @param int $userId Logged-in investor user ID
+ * @return array|null Associative array of extracted details, or null if no valid XML exists
+ */
+function readIdentityDocumentXmlSecure(int $userId): ?array {
+    $projectRoot = dirname(__DIR__);
+    $xmlFullPath = $projectRoot . '/storage/ekyc_xml/investor_' . (int)$userId . '.xml';
+
+    if (!file_exists($xmlFullPath) || !is_readable($xmlFullPath)) {
+        return null;
+    }
+
+    $xmlContent = file_get_contents($xmlFullPath);
+    if ($xmlContent === false || trim($xmlContent) === '') {
+        return null;
+    }
+
+    // Clean any XML entities or literal entities before parsing
+    $xmlContent = str_replace(["&#xA;", "&#xa;", "&#xA0;", "&#xa0;"], [" ", " ", " ", " "], $xmlContent);
+
+    // XXE Protection: Disable external entity resolution
+    $prevEntityLoader = libxml_disable_entity_loader(true);
+    libxml_use_internal_errors(true);
+
+    $xml = simplexml_load_string($xmlContent, 'SimpleXMLElement', LIBXML_NONET | LIBXML_NOENT);
+    libxml_disable_entity_loader($prevEntityLoader);
+
+    if ($xml === false) {
+        libxml_clear_errors();
+        return null;
+    }
+
+    $cleanStr = function($val) {
+        $str = trim((string)$val);
+        $str = str_replace(["&#xA;", "&#xa;", "&#xA0;", "&#xa0;", "&nbsp;"], [" ", " ", " ", " ", " "], $str);
+        $str = preg_replace('/\s+/', ' ', $str);
+        return trim($str);
+    };
+
+    $fullName   = $cleanStr($xml->FullName ?? '');
+    $dob        = $cleanStr($xml->DateOfBirth ?? '');
+    $gender     = $cleanStr($xml->Gender ?? '');
+    $address    = $cleanStr($xml->Address ?? '');
+    $mobile     = $cleanStr($xml->MobileNumber ?? $xml->Mobile ?? '');
+    $idNumber   = $cleanStr($xml->IDNumber ?? '');
+    $photoPath  = $cleanStr($xml->PhotographPath ?? '');
+
+    return [
+        'full_name'       => $fullName !== '' ? $fullName : null,
+        'dob'             => $dob !== '' ? $dob : null,
+        'gender'          => $gender !== '' ? $gender : null,
+        'address'         => $address !== '' ? $address : null,
+        'mobile'          => $mobile !== '' ? $mobile : null,
+        'id_number'       => $idNumber !== '' ? $idNumber : null,
+        'photograph_path' => $photoPath !== '' ? $photoPath : null,
+        'xml_file_path'   => 'storage/ekyc_xml/investor_' . (int)$userId . '.xml'
+    ];
+}
+
 
 
 

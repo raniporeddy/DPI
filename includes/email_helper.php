@@ -270,14 +270,16 @@ function sendESignEmailRequest($recipientEmail, $investorName, $agreementTitle, 
 /**
  * Dispatch Aadhaar eKYC Submission Request Email directly to investor email address
  */
-function sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl) {
+function sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl, $expiresAt = null) {
     $smtpHost  = getEnvVal('SMTP_HOST', 'smtp.gmail.com');
     $smtpUser  = getEnvVal('SMTP_USER', '');
     $smtpPass  = getEnvVal('SMTP_PASS', '');
     $smtpPort  = getEnvVal('SMTP_PORT', '587');
     $fromName  = getEnvVal('SMTP_FROM_NAME', 'Digital Investor System');
 
-    $subject = "Action Required: Complete Your Aadhaar eKYC Verification";
+    $subject = "Action Required: Complete Your eKYC Identity Verification";
+
+    $expiryText = $expiresAt ? date('M d, Y h:i A', strtotime($expiresAt)) : '24 hours from issuance';
 
     $htmlContent = '
     <!DOCTYPE html>
@@ -286,41 +288,49 @@ function sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl) {
         <meta charset="UTF-8">
         <style>
             body { font-family: "Segoe UI", Arial, sans-serif; background-color: #f4f6f9; color: #333; margin: 0; padding: 20px; }
-            .container { max-width: 600px; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin: 0 auto; border-top: 5px solid #ffc107; }
+            .container { max-width: 600px; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin: 0 auto; border-top: 5px solid #0d6efd; }
             .header { padding: 25px; background: #071527; color: #ffffff; text-align: center; }
             .content { padding: 30px; line-height: 1.6; }
             .btn { display: inline-block; background-color: #0d6efd; color: #ffffff !important; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; margin: 24px 0; }
             .footer { padding: 20px; background: #f8f9fa; font-size: 12px; color: #6c757d; text-align: center; border-top: 1px solid #e9ecef; }
             .card-box { background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin: 15px 0; }
+            .demo-badge { background: #fff3cd; color: #664d03; border: 1px solid #ffe69c; border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 15px; }
+            .expiry-badge { background: #e7f1ff; color: #084298; border: 1px solid #b6d4fe; border-radius: 6px; padding: 8px 12px; font-size: 13px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
                 <h2 style="margin:0;">Digital Investor Onboarding System</h2>
-                <span style="font-size:13px; color:#cbd5e1;">Aadhaar eKYC Verification Workflow</span>
+                <span style="font-size:13px; color:#cbd5e1;">Electronic KYC Verification Workflow</span>
             </div>
             <div class="content">
-                <p>Hello,</p>
-                <p>An Aadhaar eKYC submission request has been generated for <strong>' . htmlspecialchars($investorName) . '</strong>.</p>
-                <div class="card-box">
-                    <strong style="color:#0d6efd; font-size:16px;">Aadhaar Document & Photo Submission Portal</strong>
+                <div class="demo-badge">
+                    <strong>Academic Demonstration Note:</strong> This module performs synthetic, document-based verification offline for prototype demonstration. It does not perform live UIDAI government authentication.
                 </div>
-                <p>Please click the button below to open your secure single-use eKYC submission portal. You will be able to upload your Aadhaar document, photo, and identity details for verification.</p>
+                <p>Hello <strong>' . htmlspecialchars($investorName) . '</strong>,</p>
+                <p>You have requested an electronic identity verification (eKYC) link for your Digital Investor Onboarding account.</p>
+                <div class="card-box">
+                    <strong style="color:#0d6efd; font-size:16px;">Identity Document & Photograph Verification Portal</strong>
+                    <div style="font-size:13px; color:#555; margin-top:6px;">Upload your identity document (Aadhaar / ID Card) in JPG, PNG, or PDF format for offline OCR extraction and face photograph verification.</div>
+                </div>
+                <div class="expiry-badge">
+                    <i class="fas fa-clock"></i> <strong>Single-Use Link Security:</strong> This link is valid until <strong>' . htmlspecialchars($expiryText) . '</strong> and can be used once.
+                </div>
                 <p style="text-align: center;">
-                    <a href="' . htmlspecialchars($submissionUrl) . '" class="btn">Open eKYC Submission Portal</a>
+                    <a href="' . htmlspecialchars($submissionUrl) . '" class="btn">Open eKYC Upload Portal</a>
                 </p>
                 <p style="font-size:13px; color:#64748b;">If the button above does not work, copy and paste this link into your web browser:</p>
                 <p style="word-break: break-all; font-size: 12px; color: #0d6efd;"><a href="' . htmlspecialchars($submissionUrl) . '">' . htmlspecialchars($submissionUrl) . '</a></p>
             </div>
             <div class="footer">
-                &copy; ' . date('Y') . ' Digital Investor Onboarding System. Access token is single-use and encrypted.
+                &copy; ' . date('Y') . ' Digital Investor Onboarding System. Single-use secure token. Academic Prototype Demonstration.
             </div>
         </div>
     </body>
     </html>';
 
-    // Save copy of HTML email to inbox folder
+    // Save copy of HTML email to inbox folder for email inbox preview/simulation
     $inboxDir = dirname(__DIR__) . '/uploads/email_inbox';
     if (!file_exists($inboxDir)) {
         @mkdir($inboxDir, 0777, true);
@@ -328,29 +338,37 @@ function sendEKYCEmailRequest($recipientEmail, $investorName, $submissionUrl) {
     $inboxFile = $inboxDir . '/mail_ekyc_' . preg_replace('/[^a-zA-Z0-9_]/', '_', $recipientEmail) . '_' . time() . '.html';
     @file_put_contents($inboxFile, $htmlContent);
 
+    // 1. If SMTP credentials exist, attempt Live Pure PHP Socket Dispatch
     if (!empty($smtpHost) && !empty($smtpUser) && !empty($smtpPass)) {
         $res = sendPurePhpSmtpSocket($recipientEmail, $subject, $htmlContent, $smtpUser, $smtpPass, $smtpHost, $smtpPort, $fromName);
         if ($res['success']) {
             return [
                 'success' => true,
                 'is_demo' => false,
-                'message' => 'eKYC submission email delivered directly to recipient inbox (' . $recipientEmail . ') via Live SMTP!',
+                'message' => 'eKYC verification email delivered directly to recipient inbox (' . $recipientEmail . ') via Live SMTP!',
                 'delivery_status' => 'Sent via SMTP',
                 'inbox_file' => $inboxFile
             ];
         } else {
+            // If live SMTP fails (e.g., offline or network timeout in XAMPP), record error and fallback to saved inbox file
             return [
-                'success' => false,
-                'error' => 'Failed to send eKYC request email to ' . $recipientEmail . '. SMTP Error: ' . $res['error'],
-                'delivery_status' => 'Failed'
+                'success' => true,
+                'is_demo' => true,
+                'warning' => 'Live SMTP dispatch failed (' . $res['error'] . '), but email was generated and saved to inbox simulator for local testing.',
+                'message' => 'eKYC verification link generated successfully.',
+                'delivery_status' => 'Saved to Local Inbox Simulator',
+                'inbox_file' => $inboxFile
             ];
         }
     }
 
+    // 2. Local Demo mode fallback
     return [
-        'success' => false,
-        'error' => 'SMTP credentials (SMTP_USER & 16-character Gmail App Password) are not set in the project .env file.',
-        'delivery_status' => 'Unconfigured'
+        'success' => true,
+        'is_demo' => true,
+        'message' => 'eKYC verification link generated and saved to local inbox simulator for testing.',
+        'delivery_status' => 'Saved to Local Inbox Simulator',
+        'inbox_file' => $inboxFile
     ];
 }
 

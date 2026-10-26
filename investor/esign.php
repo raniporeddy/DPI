@@ -18,6 +18,14 @@ requireRole('investor');
 $userId = $_SESSION['user_id'];
 $error = '';
 
+// Guard: Require all 3 mandatory documents before allowing access to eSign
+$reqDocsCheck = checkUserRequiredDocuments($pdo, $userId);
+if (!$reqDocsCheck['all_completed']) {
+    setFlash('warning', 'Please upload all 3 mandatory documents (' . implode(', ', $reqDocsCheck['missing']) . ') before proceeding to eSign.');
+    header("Location: /digital-investor/investor/documents.php");
+    exit;
+}
+
 // Automatically fetch logged-in user email address from authentication account
 $stmtUser = $pdo->prepare("
     SELECT u.email as auth_email, p.email as profile_email 

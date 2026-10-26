@@ -1,6 +1,6 @@
 <?php
 // investor/ekyc.php
-// Academic Demo eKYC Verification Module with Email Workflow & Document Preview
+// eKYC Identity Verification - Secure Password-Protected XML Document Details Viewer
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -14,134 +14,95 @@ require_once __DIR__ . '/../includes/notification_helper.php';
 
 requireRole('investor');
 
-$userId = $_SESSION['user_id'];
-$error = '';
+$userId = (int) $_SESSION['user_id'];
+$error  = '';
 
-// Fetch existing eKYC submission
-$stmt = $pdo->prepare("SELECT * FROM kyc_verification WHERE user_id = ?");
-$stmt->execute([$userId]);
-$kyc = $stmt->fetch();
+// 1. Fetch user account for secure password verification
+$stmtUser = $pdo->prepare("SELECT id, email, password FROM users WHERE id = ?");
+$stmtUser->execute([$userId]);
+$userRow = $stmtUser->fetch();
 
-// Pre-fill from investor profile if available
-$stmtProf = $pdo->prepare("SELECT * FROM investor_profiles WHERE user_id = ?");
-$stmtProf->execute([$userId]);
-$profile = $stmtProf->fetch();
+// 2. Fetch KYC record for THIS logged-in investor ONLY (enforcing user isolation)
+$stmtKyc = $pdo->prepare("SELECT * FROM kyc_verification WHERE user_id = ?");
+$stmtKyc->execute([$userId]);
+$kyc = $stmtKyc->fetch();
 
-// Handle Form Submission BEFORE HTML Output
+// 3. Read OCR-extracted document details from secure account XML via PHP SimpleXML
+$xmlData = readIdentityDocumentXmlSecure($userId);
+
+// Fallback auto-sync: if XML doesn't exist yet on disk but KYC database record has OCR data, generate it
+if (!$xmlData && !empty($kyc) && (!empty($kyc['ocr_name']) || !empty($kyc['photo_path']) || !empty($kyc['document_path']))) {
+    $xmlRelative = saveIdentityDocumentXml($userId, [
+        'full_name'  => $kyc['ocr_name'] ?? '',
+        'dob'        => $kyc['ocr_dob'] ?? '',
+        'gender'     => $kyc['ocr_gender'] ?? '',
+        'id_number'  => $kyc['ocr_id_number'] ?? '',
+        'address'    => $kyc['ocr_address'] ?? '',
+        'mobile'     => $kyc['ocr_mobile'] ?? '',
+        'photo_path' => $kyc['photo_path'] ?? ''
+    ]);
+    $pdo->prepare("UPDATE kyc_verification SET xml_path = ? WHERE user_id = ?")->execute([$xmlRelative, $userId]);
+    $xmlData = readIdentityDocumentXmlSecure($userId);
+}
+
+// Check whether an uploaded document or extracted OCR record exists
+$hasDocument = !empty($kyc['document_path']) || !empty($xmlData['full_name']) || !empty($xmlData['photograph_path']);
+
+// Per-session unlock state (keyed by user ID to guarantee strict user isolation)
+$sessionUnlockKey = 'ekyc_unlocked_user_' . $userId;
+$isUnlocked = !empty($_SESSION[$sessionUnlockKey]);
+
+// 4. Handle POST actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verifyCSRFPost();
 
-    // 1. Handle Email-Based eKYC Submission Request
-    if (isset($_POST['send_ekyc_email'])) {
-        $recipientEmail = $_SESSION['email'];
-        $reqRes = createEKYCRequest($pdo, $userId, $recipientEmail);
-        if ($reqRes['success']) {
-            setFlash('success', 'eKYC submission email delivered directly to your inbox (' . $recipientEmail . ') via Live Gmail SMTP! Please check your email to open your secure portal.');
+    // Lock Details action
+    if (isset($_POST['lock_ekyc'])) {
+        unset($_SESSION[$sessionUnlockKey]);
+        $isUnlocked = false;
+        setFlash('info', 'Your eKYC details have been locked.');
+        header("Location: /digital-investor/investor/ekyc.php");
+        exit;
+    }
+
+    // Verify Password action
+    if (isset($_POST['verify_password'])) {
+        $enteredPassword = $_POST['account_password'] ?? '';
+
+        if (empty($enteredPassword)) {
+            $error = 'Please enter your account password to verify your identity.';
+        } elseif (!$userRow || empty($userRow['password'])) {
+            $error = 'Account credentials not found. Please log in again.';
+        } elseif (!password_verify($enteredPassword, $userRow['password'])) {
+            // Secure verification against bcrypt hash using password_verify()
+            $error = 'Incorrect account password. Please check your password and try again.';
+            usleep(250000); // 250ms throttle to prevent brute-force
+        } else {
+            // Password verified successfully!
+            $_SESSION[$sessionUnlockKey] = true;
+            $isUnlocked = true;
             header("Location: /digital-investor/investor/ekyc.php");
             exit;
-        } else {
-            $error = $reqRes['error'] ?? 'Failed to send eKYC email.';
         }
-    } else {
-        // 2. Handle Direct Form Submission
-        $idType   = trim($_POST['id_type'] ?? 'Aadhaar');
-        $idNumber = strtoupper(trim($_POST['id_number'] ?? ''));
-        $fullName = trim($_POST['full_name'] ?? '');
-        $dob      = trim($_POST['dob'] ?? '');
-        $address  = trim($_POST['address'] ?? '');
+    }
 
-        if (empty($idNumber) || empty($fullName) || empty($dob) || empty($address)) {
-            $error = 'All mandatory identity fields are required for eKYC submission.';
-        } else {
-            $docPath = $kyc['document_path'] ?? null;
-            $photoPath = $kyc['photo_path'] ?? null;
-            $ocrName = $kyc['ocr_name'] ?? null;
-            $ocrDob = $kyc['ocr_dob'] ?? null;
-            $ocrAddress = $kyc['ocr_address'] ?? null;
-            $ocrIdNumber = $kyc['ocr_id_number'] ?? null;
-            $ocrStatus = 'Processed';
-
-            // Handle Identity Document Upload & Automatic Photo & OCR Extraction
-            if (isset($_FILES['kyc_document']) && $_FILES['kyc_document']['error'] !== UPLOAD_ERR_NO_FILE) {
-                if ($_FILES['kyc_document']['error'] !== UPLOAD_ERR_OK) {
-                    $error = 'File upload error (Code ' . $_FILES['kyc_document']['error'] . '). Please select a valid document file.';
-                } else {
-                    $uploadResult = handleSecureFileUpload($_FILES['kyc_document'], dirname(__DIR__) . '/uploads/kyc', ['jpg', 'jpeg', 'png', 'pdf']);
-                    if (!$uploadResult['success']) {
-                        $error = 'Document Upload Error: ' . $uploadResult['error'];
-                    } else {
-                        $docPath = 'uploads/kyc/' . basename($uploadResult['file_path']);
-
-                        // Extract photograph & OCR identity details offline
-                        $procRes = processKYCDocumentDetailed($uploadResult['file_path'], dirname(__DIR__) . '/uploads/extracted', $userId);
-                        
-                        if (!empty($procRes['photo_path'])) {
-                            $photoPath = $procRes['photo_path'];
-                        }
-
-                        $ocrName = !empty($procRes['ocr_name']) ? $procRes['ocr_name'] : null;
-                        $ocrDob = !empty($procRes['ocr_dob']) ? $procRes['ocr_dob'] : null;
-                        $ocrAddress = !empty($procRes['ocr_address']) ? $procRes['ocr_address'] : null;
-                        $ocrIdNumber = !empty($procRes['ocr_id_number']) ? $procRes['ocr_id_number'] : null;
-                        $ocrStatus = $procRes['ocr_status'] ?? 'Processed';
-
-                        // Insert document into documents repository
-                        $stmtDocIns = $pdo->prepare("INSERT INTO documents (user_id, doc_type, doc_name, file_path, file_size, status) VALUES (?, 'Identity Proof', ?, ?, ?, 'Pending')");
-                        $stmtDocIns->execute([$userId, $idType . ' Document - ' . $uploadResult['file_name'], $docPath, $uploadResult['file_size']]);
-                    }
-                }
-            }
-
-            if (empty($error)) {
-                if (!$docPath) {
-                    $error = 'Please upload a valid identity document copy (JPG, PNG or PDF).';
-                } else {
-                    try {
-                        $newStatus = 'Submitted';
-
-                        if ($kyc) {
-                            $stmtUpd = $pdo->prepare("
-                                UPDATE kyc_verification 
-                                SET id_type = ?, id_number = ?, full_name = ?, dob = ?, address = ?, 
-                                    ocr_name = ?, ocr_dob = ?, ocr_address = ?, ocr_id_number = ?, ocr_status = ?,
-                                    document_path = ?, photo_path = ?, status = ?, updated_at = NOW() 
-                                WHERE user_id = ?
-                            ");
-                            $stmtUpd->execute([$idType, $idNumber, $fullName, $dob, $address, $ocrName, $ocrDob, $ocrAddress, $ocrIdNumber, $ocrStatus, $docPath, $photoPath, $newStatus, $userId]);
-                        } else {
-                            $stmtIns = $pdo->prepare("
-                                INSERT INTO kyc_verification 
-                                (user_id, id_type, id_number, full_name, dob, address, ocr_name, ocr_dob, ocr_address, ocr_id_number, ocr_status, document_path, photo_path, status) 
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ");
-                            $stmtIns->execute([$userId, $idType, $idNumber, $fullName, $dob, $address, $ocrName, $ocrDob, $ocrAddress, $ocrIdNumber, $ocrStatus, $docPath, $photoPath, $newStatus]);
-                        }
-
-                        // Update investor_profiles
-                        $stmtProfUpd = $pdo->prepare("UPDATE investor_profiles SET full_name = ?, dob = ?, id_type = ?, id_number = ?, address = ?, updated_at = NOW() WHERE user_id = ?");
-                        $stmtProfUpd->execute([$fullName, $dob, $idType, $idNumber, $address, $userId]);
-
-                        refreshApplicationStatus($pdo, $userId);
-
-                        // Create Admin Notification
-                        createAdminNotification($pdo, $userId, 'ekyc_submission', "Investor " . $fullName . " submitted eKYC document for admin verification.");
-
-                        setFlash('success', 'eKYC document submitted successfully! Admin review is pending.');
-                        header("Location: /digital-investor/investor/ekyc.php");
-                        exit;
-
-                    } catch (Exception $e) {
-                        error_log("eKYC Submission Error: " . $e->getMessage());
-                        $error = 'Database error submitting eKYC. Please try again.';
-                    }
-                }
-            }
-        }
+    // Request Resubmission action (separate action, only when rejected)
+    if (isset($_POST['request_resubmission']) && $hasDocument && ($kyc['status'] ?? '') === 'Rejected') {
+        $reason = trim($_POST['resubmit_reason'] ?? 'Investor requested document resubmission after administrative review.');
+        createAdminNotification(
+            $pdo,
+            $userId,
+            'kyc_resubmit_request',
+            "Investor (ID {$userId}) requested eKYC resubmission. Note: {$reason}"
+        );
+        setFlash('success', 'Your resubmission request has been submitted to the administrator for review.');
+        header("Location: /digital-investor/investor/ekyc.php");
+        exit;
     }
 }
 
-// Render HTML View
-$pageTitle = "Demo eKYC Verification & OCR Details - Digital Investor Onboarding";
+// Render HTML
+$pageTitle = "eKYC Document Verification - Digital Investor Onboarding";
 require_once __DIR__ . '/../includes/header.php';
 ?>
 
@@ -151,263 +112,386 @@ require_once __DIR__ . '/../includes/header.php';
             <?php echo displayFlash(); ?>
 
             <?php if (!empty($error)): ?>
-                <div class="alert alert-danger alert-dismissible fade show shadow-sm" role="alert">
+                <div class="alert alert-danger alert-dismissible fade show shadow-sm rounded-3 mb-4" role="alert">
                     <i class="fas fa-exclamation-circle me-2"></i><?php echo e($error); ?>
                     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                 </div>
             <?php endif; ?>
 
-            <!-- EMAIL-BASED EKYC WORKFLOW CARD -->
-            <div class="card bg-white border border-2 border-warning-subtle shadow-sm rounded-4 p-4 mb-4">
-                <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
-                    <div>
-                        <h5 class="fw-bold text-dark mb-1">
-                            <i class="fas fa-envelope text-warning me-2"></i>Submit Aadhaar eKYC by Email Workflow
-                        </h5>
-                        <p class="text-muted small mb-0">Send a single-use secure eKYC submission portal link directly to your registered email inbox (<code><?php echo e($_SESSION['email']); ?></code>).</p>
+            <?php if (!$hasDocument): ?>
+                <!-- ========================================================
+                     SCENARIO 1: NO UPLOADED DOCUMENT / OCR RECORDS (Requirement 7)
+                     ======================================================== -->
+                <div class="card bg-white border border-2 border-secondary-subtle shadow-sm rounded-4 p-5 text-center my-4">
+                    <div class="mx-auto mb-3 text-secondary">
+                        <i class="fas fa-file-excel fa-4x text-muted"></i>
                     </div>
-                    <form action="/digital-investor/investor/ekyc.php" method="POST" class="m-0">
+                    <h4 class="fw-bold text-dark mb-2">No Document Uploaded</h4>
+                    <p class="text-muted mx-auto mb-4" style="max-width: 520px;">
+                        No uploaded identity document or extracted eKYC records found. Please submit your identity document first. Document details are never fabricated.
+                    </p>
+                    <div class="d-flex justify-content-center gap-3">
+                        <a href="/digital-investor/dashboard.php" class="btn btn-outline-secondary px-4 py-2 rounded-pill">
+                            <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
+                        </a>
+                        <a href="/digital-investor/dashboard.php" class="btn btn-primary px-4 py-2 fw-semibold rounded-pill">
+                            <i class="fas fa-upload me-1"></i> Submit Identity Document
+                        </a>
+                    </div>
+                </div>
+
+            <?php elseif (!$isUnlocked): ?>
+                <!-- ========================================================
+                     SCENARIO 2: PASSWORD VERIFICATION PAGE (Requirements 1 & 9)
+                     ======================================================== -->
+                <div class="card border-0 shadow rounded-4 p-4 p-md-5 mx-auto my-3" style="max-width: 500px;">
+                    <div class="text-center mb-4">
+                        <div class="bg-primary bg-opacity-10 text-primary rounded-circle d-inline-flex align-items-center justify-content-center p-3 mb-3" style="width: 70px; height: 70px;">
+                            <i class="fas fa-shield-alt fa-2x"></i>
+                        </div>
+                        <h4 class="fw-bold text-dark mb-1">eKYC Security Verification</h4>
+                        <p class="text-muted small mb-0">
+                            Please verify your identity with your account password to view your document-extracted eKYC details.
+                        </p>
+                    </div>
+
+                    <form action="/digital-investor/investor/ekyc.php" method="POST" id="passwordVerifyForm">
                         <?php echo csrfField(); ?>
-                        <button type="submit" name="send_ekyc_email" value="1" class="btn btn-warning btn-lg fw-bold px-4 rounded-3 shadow-sm">
-                            <i class="fas fa-paper-plane me-2"></i>Send eKYC Link to My Email
+                        <input type="hidden" name="verify_password" value="1">
+
+                        <div class="mb-4">
+                            <label for="account_password" class="form-label fw-semibold text-dark small">
+                                Account Password <span class="text-danger">*</span>
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light"><i class="fas fa-lock text-muted"></i></span>
+                                <input type="password" 
+                                       class="form-control" 
+                                       id="account_password" 
+                                       name="account_password" 
+                                       placeholder="Enter your registered account password" 
+                                       autocomplete="current-password"
+                                       required 
+                                       autofocus>
+                                <button type="button" class="btn btn-outline-secondary" id="togglePwBtn" onclick="togglePasswordVisibility()" title="Show/Hide Password">
+                                    <i class="fas fa-eye" id="pwEyeIcon"></i>
+                                </button>
+                            </div>
+                            <div class="form-text text-muted small mt-1">
+                                <i class="fas fa-shield-halved text-success me-1"></i> Securely authenticated using <code>password_verify()</code>.
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary w-100 fw-bold py-2 rounded-3 shadow-sm mb-3" id="btnVerify">
+                            <i class="fas fa-unlock me-2"></i> Verify Password &amp; View Details
                         </button>
+
+                        <a href="/digital-investor/dashboard.php" class="btn btn-outline-secondary w-100 py-2 rounded-3">
+                            <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
+                        </a>
                     </form>
                 </div>
-            </div>
 
-            <!-- Demo eKYC Academic Disclaimer Banner -->
-            <div class="alert alert-secondary border-0 shadow-sm mb-4 d-flex align-items-center rounded-3">
-                <i class="fas fa-graduation-cap fs-3 text-primary me-3"></i>
-                <div>
-                    <strong class="d-block text-dark">Demo eKYC Module (Academic Demonstration System)</strong>
-                    <small class="text-muted">This module processes synthetic/sample identity documents offline. It does not perform live UIDAI government verification or claim official Aadhaar authentication.</small>
-                </div>
-            </div>
+            <?php else: ?>
+                <!-- ========================================================
+                     SCENARIO 3: DOCUMENT-EXTRACTED OCR / XML DETAILS DISPLAY
+                     (Requirements 2, 3, 4, 5, 6, 8, 10)
+                     ======================================================== -->
+                <?php
+                    // Resolve photograph extracted from document ONLY (never profile photo)
+                    $rawPhotoPath = $xmlData['photograph_path'] ?? ($kyc['photo_path'] ?? '');
+                    $projectRoot  = dirname(__DIR__);
+                    $photoAbsFull = !empty($rawPhotoPath)
+                        ? rtrim($projectRoot, '/\\') . '/' . ltrim(str_replace('\\', '/', $rawPhotoPath), '/')
+                        : null;
 
-            <div class="card shadow-sm border-0 rounded-4 mb-4">
-                <div class="card-header bg-white py-3 border-bottom d-flex align-items-center justify-content-between flex-wrap gap-2">
-                    <h4 class="fw-bold mb-0 text-primary"><i class="fas fa-id-card me-2"></i>Demo eKYC Verification & OCR Review</h4>
+                    if (!empty($rawPhotoPath) && !file_exists($photoAbsFull)) {
+                        $photoWithPrefix = $projectRoot . '/uploads/extracted/' . basename($rawPhotoPath);
+                        if (file_exists($photoWithPrefix)) {
+                            $rawPhotoPath = 'uploads/extracted/' . basename($rawPhotoPath);
+                            $photoAbsFull = $photoWithPrefix;
+                        }
+                    }
+
+                    $hasPhoto = !empty($rawPhotoPath) && file_exists($photoAbsFull);
+                    $displayPhotoPath = $hasPhoto ? $rawPhotoPath : null;
+
+                    // Extract actual document values from XML (strictly NO profile fallbacks)
+                    $extractedName    = !empty($xmlData['full_name']) ? $xmlData['full_name'] : null;
+                    $extractedDob     = !empty($xmlData['dob']) ? $xmlData['dob'] : null;
+                    $extractedGender  = !empty($xmlData['gender']) ? $xmlData['gender'] : null;
+                    $extractedAddress = !empty($xmlData['address']) ? $xmlData['address'] : null;
+                    $extractedMobile  = !empty($xmlData['mobile']) ? $xmlData['mobile'] : null;
+                    $extractedIdRaw   = !empty($xmlData['id_number']) ? $xmlData['id_number'] : null;
+
+                    // Mask ID number by default
+                    $maskedIdNumber = !empty($extractedIdRaw) ? maskAadhaarNumber($extractedIdRaw, 'Aadhaar') : null;
+                ?>
+
+                <!-- Academic Demonstration / Document-Extracted Disclaimer Banner -->
+                <div class="alert alert-secondary border-0 shadow-sm mb-4 d-flex align-items-center rounded-3">
+                    <i class="fas fa-microchip fs-3 text-primary me-3 flex-shrink-0"></i>
                     <div>
-                        <span class="badge bg-secondary me-2">Module 2 of 4</span>
-                        <?php echo renderStatusBadge($kyc['status'] ?? 'Pending'); ?>
+                        <strong class="d-block text-dark">Document-Extracted Details (OCR &amp; XML Record)</strong>
+                        <small class="text-muted">
+                            These details were extracted directly from the uploaded identity document and stored in your secure account XML record. Offline document OCR extraction does not constitute live UIDAI government verification or official Aadhaar authentication.
+                        </small>
                     </div>
                 </div>
 
-                <div class="card-body p-4">
+                <!-- Main Card Header -->
+                <div class="card shadow-sm border-0 rounded-4 mb-4">
+                    <div class="card-header bg-white py-3 border-bottom d-flex align-items-center justify-content-between flex-wrap gap-2">
+                        <h4 class="fw-bold mb-0 text-primary">
+                            <i class="fas fa-id-card me-2"></i>Demo eKYC Verification &amp; OCR Review
+                        </h4>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-secondary">Module 2 of 4</span>
+                            <?php echo renderStatusBadge($kyc['status'] ?? 'Submitted'); ?>
+                            
+                            <form action="/digital-investor/investor/ekyc.php" method="POST" class="d-inline m-0 ms-2">
+                                <?php echo csrfField(); ?>
+                                <button type="submit" name="lock_ekyc" value="1" class="btn btn-sm btn-outline-secondary rounded-pill" title="Lock details again">
+                                    <i class="fas fa-lock me-1"></i> Lock Details
+                                </button>
+                            </form>
+                        </div>
+                    </div>
 
-                    <!-- TOP eKYC RESULT SCREEN: Extracted Face Photo & OCR Details (No Full Document Image) -->
-                    <?php if (isset($kyc['status']) && in_array($kyc['status'], ['Submitted', 'Verified', 'Rejected'])): ?>
-                        <?php 
-                            $rawPhotoPath = $kyc['photo_path'] ?? '';
-                            $hasPhoto = !empty($rawPhotoPath) && file_exists(dirname(__DIR__) . '/' . $rawPhotoPath);
-                            $displayPhotoPath = $hasPhoto ? $rawPhotoPath : null;
+                    <div class="card-body p-4">
 
-                            $maskedAadhaar = maskAadhaarNumber($kyc['id_number'], $kyc['id_type']);
-                            $maskedOcrAadhaar = !empty($kyc['ocr_id_number']) ? maskAadhaarNumber($kyc['ocr_id_number'], $kyc['id_type']) : null;
-                        ?>
+                        <!-- Rejection Notice (if rejected by administrator) -->
+                        <?php if (($kyc['status'] ?? '') === 'Rejected'): ?>
+                            <div class="alert alert-danger border border-danger rounded-4 d-flex align-items-start gap-3 mb-4 shadow-sm" role="alert">
+                                <i class="fas fa-ban fa-lg text-danger mt-1 flex-shrink-0"></i>
+                                <div class="w-100">
+                                    <strong class="d-block mb-1">eKYC Submission Rejected by Administrator</strong>
+                                    <p class="mb-2 small text-muted">
+                                        Your previous eKYC document submission was reviewed and rejected.
+                                        <?php if (!empty($kyc['admin_remarks'])): ?>
+                                            <br><em class="mt-1 d-block text-danger-emphasis fw-semibold">Admin note: <?php echo e($kyc['admin_remarks']); ?></em>
+                                        <?php endif; ?>
+                                    </p>
+                                    <div class="mt-2">
+                                        <button type="button" class="btn btn-sm btn-danger rounded-pill fw-semibold" data-bs-toggle="modal" data-bs-target="#requestResubmitModal">
+                                            <i class="fas fa-redo me-1"></i> Request Document Resubmission
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endif; ?>
 
+                        <!-- eKYC Verification Details Box -->
                         <div class="card bg-white border border-2 border-primary-subtle shadow-sm rounded-4 p-4 mb-4">
-                            <!-- Header with Title & Status Badge -->
                             <div class="border-bottom pb-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-2">
                                 <div>
-                                    <h4 class="fw-bold text-dark mb-1">
+                                    <h4 class="fw-bold text-dark mb-0">
                                         <i class="fas fa-user-check text-primary me-2"></i>eKYC Verification Details
                                     </h4>
-                                    <small class="text-muted">Extracted face photograph and side-by-side OCR verification details</small>
                                 </div>
                                 <div>
-                                    <?php echo renderStatusBadge($kyc['status']); ?>
+                                    <?php echo renderStatusBadge($kyc['status'] ?? 'Submitted'); ?>
                                 </div>
                             </div>
 
                             <div class="row g-4">
-                                <!-- LEFT COLUMN: EXTRACTED FACE PHOTOGRAPH ONLY (NO FULL DOCUMENT IMAGE) -->
+                                <!-- LEFT COLUMN: EXTRACTED FACE PHOTOGRAPH FROM DOCUMENT ONLY -->
                                 <div class="col-lg-5">
                                     <div class="card bg-light border p-4 rounded-4 h-100 shadow-sm text-center d-flex flex-column justify-content-center align-items-center">
                                         <h6 class="fw-bold text-dark border-bottom w-100 pb-2 mb-3">
                                             <i class="fas fa-camera text-primary me-2"></i>Extracted Document Photograph
                                         </h6>
                                         <?php if ($hasPhoto): ?>
-                                            <div class="bg-white p-2 d-inline-block rounded-4 border shadow-sm my-2">
-                                                <img src="/digital-investor/<?php echo e($displayPhotoPath); ?>?v=<?php echo time(); ?>" 
-                                                     alt="Document Photograph" 
-                                                     style="width: 140px; height: 175px; object-fit: cover; object-position: center;" 
-                                                     class="rounded-3">
+                                            <div class="bg-white p-2 d-inline-block rounded-4 border shadow-sm my-2"
+                                                 style="line-height:0;">
+                                                <img src="/digital-investor/<?php echo e($displayPhotoPath); ?>?v=<?php echo time(); ?>"
+                                                     alt="Extracted Document Photograph"
+                                                     style="width: 165px; height: auto; max-height: 215px;
+                                                            object-fit: contain;
+                                                            object-position: center;
+                                                            background: #f8f9fa;
+                                                            display: block;"
+                                                     class="rounded-3 shadow-none">
                                             </div>
-                                            <small class="d-block text-success fw-bold mt-2">
-                                                <i class="fas fa-check-circle me-1"></i> Face Portrait Extracted
-                                            </small>
+                                            <p class="text-muted small mt-2 mb-0" style="font-size:0.72rem;">
+                                                <i class="fas fa-info-circle me-1 text-secondary"></i>
+                                                Photo extracted directly from uploaded identity document.
+                                            </p>
                                         <?php else: ?>
                                             <div class="bg-white p-4 rounded-4 border shadow-sm my-2 text-center text-muted w-100">
                                                 <i class="fas fa-user-circle fs-1 text-secondary mb-2 d-block"></i>
                                                 <div class="alert alert-warning border border-warning rounded-3 mb-0 p-2 small">
-                                                    <i class="fas fa-exclamation-triangle me-1"></i> Face photo extraction failed. Please upload a clear Aadhaar image.
+                                                    <i class="fas fa-exclamation-triangle me-1"></i> Photograph not extracted from document.
                                                 </div>
                                             </div>
                                         <?php endif; ?>
                                     </div>
                                 </div>
 
-                                <!-- RIGHT COLUMN: SIDE-BY-SIDE OCR EXTRACTED DETAILS & COMPARISON -->
+                                <!-- RIGHT COLUMN: DOCUMENT EXTRACTED OCR / XML DETAILS -->
                                 <div class="col-lg-7">
-                                    <div class="card bg-white border border-2 border-primary-subtle p-3 p-md-4 rounded-4 shadow-sm h-100">
-                                        <h6 class="fw-bold text-dark border-bottom pb-2 mb-3">
-                                            <i class="fas fa-microchip text-primary me-2"></i>OCR Text Extraction Results
-                                        </h6>
-
+                                    <div class="card bg-white border border-2 border-primary-subtle p-3 p-md-4 rounded-4 shadow-sm h-100 d-flex flex-column justify-content-center">
                                         <div class="table-responsive">
-                                            <table class="table table-bordered align-middle small mb-3">
-                                                <thead class="table-light">
-                                                    <tr>
-                                                        <th>Field Title</th>
-                                                        <th>Extracted OCR Detail</th>
-                                                        <th>Submitted Profile Detail</th>
-                                                    </tr>
-                                                </thead>
+                                            <table class="table table-bordered align-middle small mb-0">
                                                 <tbody>
+                                                    <!-- Full Name extracted from document -->
                                                     <tr>
-                                                        <th class="bg-light">Full Name</th>
+                                                        <th class="bg-light" style="width: 32%;">Full Name</th>
                                                         <td>
-                                                            <?php if (!empty($kyc['ocr_name'])): ?>
-                                                                <strong class="text-success"><?php echo e($kyc['ocr_name']); ?></strong>
+                                                            <?php if (!empty($extractedName)): ?>
+                                                                <strong class="text-success"><?php echo e($extractedName); ?></strong>
                                                             <?php else: ?>
-                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning"><i class="fas fa-exclamation-triangle me-1"></i> Unable to extract — manual review required</span>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
                                                             <?php endif; ?>
                                                         </td>
-                                                        <td><strong><?php echo e($kyc['full_name']); ?></strong></td>
                                                     </tr>
+
+                                                    <!-- Date of Birth extracted from document -->
                                                     <tr>
                                                         <th class="bg-light">Date of Birth</th>
                                                         <td>
-                                                            <?php if (!empty($kyc['ocr_dob'])): ?>
-                                                                <strong class="text-success"><?php echo e(formatDobDisplay($kyc['ocr_dob'])); ?></strong>
+                                                            <?php if (!empty($extractedDob)): ?>
+                                                                <strong class="text-success"><?php echo e(formatDobDisplay($extractedDob)); ?></strong>
                                                             <?php else: ?>
-                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning"><i class="fas fa-exclamation-triangle me-1"></i> Unable to extract — manual review required</span>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
                                                             <?php endif; ?>
                                                         </td>
-                                                        <td><strong><?php echo e(formatDobDisplay($kyc['dob'])); ?></strong> (<?php echo e(calculateAge($kyc['dob'])); ?>)</td>
                                                     </tr>
+
+                                                    <!-- Gender extracted from document -->
+                                                    <tr>
+                                                        <th class="bg-light">Gender</th>
+                                                        <td>
+                                                            <?php if (!empty($extractedGender)): ?>
+                                                                <strong class="text-success"><?php echo e($extractedGender); ?></strong>
+                                                            <?php else: ?>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                    </tr>
+
+                                                    <!-- Full Address extracted from document -->
+                                                    <tr>
+                                                        <th class="bg-light">Full Address</th>
+                                                        <td>
+                                                            <?php if (!empty($extractedAddress)): ?>
+                                                                <span class="text-success"><?php echo e($extractedAddress); ?></span>
+                                                            <?php else: ?>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                    </tr>
+
+                                                    <!-- Mobile Number extracted from document -->
+                                                    <tr>
+                                                        <th class="bg-light">Mobile Number</th>
+                                                        <td>
+                                                            <?php if (!empty($extractedMobile)): ?>
+                                                                <span class="text-success fw-bold"><?php echo e($extractedMobile); ?></span>
+                                                            <?php else: ?>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                    </tr>
+
+                                                    <!-- ID Number extracted from document (masked by default) -->
                                                     <tr>
                                                         <th class="bg-light">ID Number</th>
                                                         <td>
-                                                            <?php if (!empty($maskedOcrAadhaar)): ?>
-                                                                <code class="text-success fw-bold"><?php echo e($maskedOcrAadhaar); ?></code>
+                                                            <?php if (!empty($maskedIdNumber)): ?>
+                                                                <code class="text-primary fw-bold" id="userAadhaarDisplay"><?php echo e($maskedIdNumber); ?></code>
+                                                                <button type="button" class="btn btn-link btn-sm p-0 ms-1" onclick="toggleAadhaarVisibility('<?php echo e($extractedIdRaw); ?>', '<?php echo e($maskedIdNumber); ?>')">
+                                                                    <small id="toggleAadhaarBtn">[Show]</small>
+                                                                </button>
                                                             <?php else: ?>
-                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning"><i class="fas fa-exclamation-triangle me-1"></i> Unable to extract — manual review required</span>
+                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning">Not extracted</span>
                                                             <?php endif; ?>
                                                         </td>
-                                                        <td>
-                                                            <code class="text-primary fw-bold" id="userAadhaarDisplay"><?php echo e($maskedAadhaar); ?></code>
-                                                            <button type="button" class="btn btn-link btn-sm p-0 ms-1" onclick="toggleAadhaarVisibility('<?php echo e($kyc['id_number']); ?>', '<?php echo e($maskedAadhaar); ?>')">
-                                                                <small id="toggleAadhaarBtn">[Show]</small>
-                                                            </button>
-                                                        </td>
-                                                    </tr>
-                                                    <tr>
-                                                        <th class="bg-light">Address</th>
-                                                        <td>
-                                                            <?php if (!empty($kyc['ocr_address'])): ?>
-                                                                <span class="text-success"><?php echo e($kyc['ocr_address']); ?></span>
-                                                            <?php else: ?>
-                                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning"><i class="fas fa-exclamation-triangle me-1"></i> Unable to extract — manual review required</span>
-                                                            <?php endif; ?>
-                                                        </td>
-                                                        <td><small><?php echo e($kyc['address']); ?></small></td>
                                                     </tr>
                                                 </tbody>
                                             </table>
-                                        </div>
-
-                                        <!-- Verification Status & Admin Remarks Box -->
-                                        <div class="p-3 bg-light rounded-3 border mt-auto">
-                                            <div class="d-flex justify-content-between align-items-center mb-1">
-                                                <small class="fw-bold text-dark">Verification Status:</small>
-                                                <?php echo renderStatusBadge($kyc['status']); ?>
-                                            </div>
-                                            <?php if (!empty($kyc['admin_remarks'])): ?>
-                                                <small class="d-block text-muted mt-2 border-top pt-2">
-                                                    <strong>Admin Remarks:</strong> <?php echo e($kyc['admin_remarks']); ?>
-                                                </small>
-                                            <?php endif; ?>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
-                    <?php endif; ?>
 
-                    <!-- eKYC SUBMISSION FORM -->
-                    <form action="/digital-investor/investor/ekyc.php" method="POST" enctype="multipart/form-data" id="ekycForm">
-                        <?php echo csrfField(); ?>
-
-                        <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
-                            <i class="fas fa-edit text-primary me-2"></i><?php echo isset($kyc['status']) ? 'Re-upload / Update eKYC Document' : 'Submit Identity Document & Details'; ?>
-                        </h5>
-
-                        <div class="row g-3 mb-3">
-                            <div class="col-md-6">
-                                <label for="id_type" class="form-label fw-semibold">ID Proof Type <span class="text-danger">*</span></label>
-                                <?php $currentIdType = $_POST['id_type'] ?? $kyc['id_type'] ?? $profile['id_type'] ?? 'Aadhaar'; ?>
-                                <select class="form-select" id="id_type" name="id_type" required>
-                                    <option value="Aadhaar" <?php echo $currentIdType === 'Aadhaar' ? 'selected' : ''; ?>>Aadhaar Card (Recommended)</option>
-                                    <option value="PAN" <?php echo $currentIdType === 'PAN' ? 'selected' : ''; ?>>PAN Card</option>
-                                    <option value="Passport" <?php echo $currentIdType === 'Passport' ? 'selected' : ''; ?>>Passport</option>
-                                    <option value="Voter ID" <?php echo $currentIdType === 'Voter ID' ? 'selected' : ''; ?>>Voter ID Card</option>
-                                </select>
-                            </div>
-
-                            <div class="col-md-6">
-                                <label for="id_number" class="form-label fw-semibold">Aadhaar / ID Number <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control text-uppercase" id="id_number" name="id_number" required value="<?php echo e($_POST['id_number'] ?? $kyc['id_number'] ?? $profile['id_number'] ?? ''); ?>" placeholder="Enter 12-digit Aadhaar Number">
-                            </div>
-                        </div>
-
-                        <div class="row g-3 mb-3">
-                            <div class="col-md-6">
-                                <label for="full_name" class="form-label fw-semibold">Full Name as per Aadhaar / ID <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" id="full_name" name="full_name" required value="<?php echo e($_POST['full_name'] ?? $kyc['full_name'] ?? $profile['full_name'] ?? ''); ?>" placeholder="Name matching document">
-                            </div>
-
-                            <div class="col-md-6">
-                                <label for="dob" class="form-label fw-semibold">Date of Birth as per Aadhaar / ID <span class="text-danger">*</span></label>
-                                <input type="date" class="form-control" id="dob" name="dob" required value="<?php echo e($_POST['dob'] ?? $kyc['dob'] ?? $profile['dob'] ?? ''); ?>">
-                            </div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label for="address" class="form-label fw-semibold">Address as per Aadhaar / ID <span class="text-danger">*</span></label>
-                            <textarea class="form-control" id="address" name="address" rows="2" required placeholder="Address text matching ID proof"><?php echo e($_POST['address'] ?? $kyc['address'] ?? $profile['address'] ?? ''); ?></textarea>
-                        </div>
-
-                        <!-- Upload Identity Document -->
-                        <div class="mb-4">
-                            <label for="kyc_document" class="form-label fw-semibold">Upload Aadhaar Card / Identity Document <span class="text-danger">*</span></label>
-                            <input type="file" class="form-control" id="kyc_document" name="kyc_document" accept=".jpg,.jpeg,.png,.pdf" data-max-size="5" <?php echo empty($kyc['document_path']) ? 'required' : ''; ?>>
-                            <div class="form-text text-muted">
-                                Allowed formats: JPG, JPEG, PNG, PDF (Max 5MB). Photo portrait and OCR text details are processed automatically offline.
-                            </div>
-                        </div>
-
-                        <div class="d-flex justify-content-between align-items-center border-top pt-4">
+                        <!-- Footer Navigation (No file upload, no editable form) -->
+                        <div class="d-flex justify-content-between align-items-center border-top pt-3">
                             <a href="/digital-investor/dashboard.php" class="btn btn-outline-secondary">
                                 <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
                             </a>
-                            <button type="submit" id="submitKycBtn" class="btn btn-primary btn-lg fw-bold px-4 rounded-3" <?php echo (isset($kyc['status']) && $kyc['status'] === 'Verified') ? 'disabled' : ''; ?>>
-                                <span id="btnText"><i class="fas fa-paper-plane me-1"></i> Submit Demo eKYC Details</span>
-                                <span id="btnSpinner" class="d-none"><i class="fas fa-spinner fa-spin me-1"></i> Processing & Extracting OCR...</span>
-                            </button>
+                            <form action="/digital-investor/investor/ekyc.php" method="POST" class="m-0">
+                                <?php echo csrfField(); ?>
+                                <button type="submit" name="lock_ekyc" value="1" class="btn btn-outline-primary">
+                                    <i class="fas fa-lock me-1"></i> Lock Details
+                                </button>
+                            </form>
                         </div>
-                    </form>
+
+                    </div>
                 </div>
-            </div>
+
+                <!-- Modal: Request Resubmission (Only when rejected) -->
+                <?php if (($kyc['status'] ?? '') === 'Rejected'): ?>
+                <div class="modal fade" id="requestResubmitModal" tabindex="-1" aria-labelledby="resubmitModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content rounded-4 border-0 shadow">
+                            <div class="modal-header bg-danger text-white">
+                                <h5 class="modal-title fw-bold" id="resubmitModalLabel">
+                                    <i class="fas fa-redo me-2"></i>Request Document Resubmission
+                                </h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <form action="/digital-investor/investor/ekyc.php" method="POST">
+                                <?php echo csrfField(); ?>
+                                <div class="modal-body p-4">
+                                    <p class="text-dark mb-3">
+                                        Send a resubmission request to the administrator. Once approved, you will be notified to provide an updated identity document.
+                                    </p>
+                                    <div class="mb-3">
+                                        <label for="resubmit_reason" class="form-label fw-semibold">Note to Administrator (Optional)</label>
+                                        <textarea class="form-control" id="resubmit_reason" name="resubmit_reason" rows="3" placeholder="Provide any additional context or clarification regarding your resubmission..."></textarea>
+                                    </div>
+                                </div>
+                                <div class="modal-footer border-top d-flex justify-content-between">
+                                    <button type="button" class="btn btn-outline-secondary rounded-pill" data-bs-dismiss="modal">Cancel</button>
+                                    <button type="submit" name="request_resubmission" value="1" class="btn btn-danger fw-bold rounded-pill px-4">
+                                        <i class="fas fa-paper-plane me-1"></i> Submit Request
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+            <?php endif; ?>
+
         </div>
     </div>
 </div>
 
 <script>
+// Show/Hide Password Toggle
+function togglePasswordVisibility() {
+    var field = document.getElementById('account_password');
+    var icon  = document.getElementById('pwEyeIcon');
+    if (!field) return;
+    if (field.type === 'password') {
+        field.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        field.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+
+// Show/Hide Masked Aadhaar Number
 function toggleAadhaarVisibility(fullVal, maskedVal) {
-    const el = document.getElementById('userAadhaarDisplay');
-    const btn = document.getElementById('toggleAadhaarBtn');
+    var el = document.getElementById('userAadhaarDisplay');
+    var btn = document.getElementById('toggleAadhaarBtn');
+    if (!el || !btn) return;
     if (el.innerText === maskedVal) {
         el.innerText = fullVal;
         btn.innerText = '[Hide]';
@@ -416,17 +500,6 @@ function toggleAadhaarVisibility(fullVal, maskedVal) {
         btn.innerText = '[Show]';
     }
 }
-
-document.getElementById('ekycForm')?.addEventListener('submit', function() {
-    const btn = document.getElementById('submitKycBtn');
-    const btnText = document.getElementById('btnText');
-    const btnSpinner = document.getElementById('btnSpinner');
-    if (btn && btnText && btnSpinner) {
-        btn.disabled = true;
-        btnText.classList.add('d-none');
-        btnSpinner.classList.remove('d-none');
-    }
-});
 </script>
 
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>

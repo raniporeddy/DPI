@@ -63,9 +63,6 @@ if ($isLoggedIn && $userRole === 'investor' && isset($pdo) && !empty($_SESSION['
                     <li class="nav-item">
                         <a class="nav-link <?php echo $currentPage === 'index.php' ? 'active fw-bold' : ''; ?>" href="/digital-investor/index.php"><i class="fas fa-home me-1"></i> Home</a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link <?php echo $currentPage === 'about.php' ? 'active fw-bold' : ''; ?>" href="/digital-investor/about.php"><i class="fas fa-info-circle me-1"></i> About Project</a>
-                    </li>
                     <?php if ($isLoggedIn && $userRole === 'investor'): ?>
                         <li class="nav-item">
                             <a class="nav-link <?php echo $currentPage === 'dashboard.php' ? 'active fw-bold' : ''; ?>" href="/digital-investor/dashboard.php"><i class="fas fa-tachometer-alt me-1"></i> Dashboard</a>
@@ -118,7 +115,6 @@ if ($isLoggedIn && $userRole === 'investor' && isset($pdo) && !empty($_SESSION['
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow border-0 mt-2" aria-labelledby="userMenu">
                                 <li><a class="dropdown-item py-2" href="<?php echo $userRole === 'admin' ? '/digital-investor/admin/dashboard.php' : '/digital-investor/dashboard.php'; ?>"><i class="fas fa-columns me-2 text-primary"></i> Dashboard</a></li>
-                                <li><a class="dropdown-item py-2" href="/digital-investor/about.php"><i class="fas fa-graduation-cap me-2 text-info"></i> Project Credits</a></li>
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item py-2 text-danger" href="/digital-investor/logout.php"><i class="fas fa-sign-out-alt me-2"></i> Logout</a></li>
                             </ul>

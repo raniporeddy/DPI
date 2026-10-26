@@ -21,12 +21,8 @@ $academicInfo = getAcademicDetails();
                     </p>
                 </div>
                 <div class="col-md-5 text-center text-md-end">
-                    <small class="text-white-50 d-block">&copy; <?php echo e($academicInfo['academic_year']); ?> Academic Final-Year Project.</small>
-                    <a href="/digital-investor/about.php" class="small text-warning text-decoration-none me-2">
-                        <i class="fas fa-info-circle me-1"></i> About Project & Credits
-                    </a>
-                    <span class="text-white-50">|</span>
-                    <small class="text-white-50 ms-2"><i class="fas fa-shield-alt text-success me-1"></i> Academic Prototype</small>
+                    <small class="text-white-50 d-block">&copy; <?php echo e($academicInfo['academic_year']); ?> Digital Investor Onboarding System.</small>
+                    <small class="text-white-50"><i class="fas fa-shield-alt text-success me-1"></i> Paperless Onboarding Platform</small>
                 </div>
             </div>
         </div>

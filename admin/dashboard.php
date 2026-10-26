@@ -27,7 +27,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'read' && isset($_GET['notif_i
 
 // Calculate Summary Statistics
 $totalInvestors = $pdo->query("SELECT COUNT(*) FROM users WHERE role = 'investor'")->fetchColumn();
-$pendingKyc     = $pdo->query("SELECT COUNT(*) FROM kyc_verification WHERE status = 'Submitted'")->fetchColumn();
+$pendingKyc     = $pdo->query("SELECT COUNT(*) FROM kyc_verification WHERE (status = 'Submitted' OR (status = 'Pending' AND document_path IS NOT NULL))")->fetchColumn();
 $pendingApprovals = $pdo->query("SELECT COUNT(*) FROM applications WHERE status IN ('Submitted', 'Under Review')")->fetchColumn();
 $approvedApps   = $pdo->query("SELECT COUNT(*) FROM applications WHERE status = 'Approved'")->fetchColumn();
 $rejectedApps   = $pdo->query("SELECT COUNT(*) FROM applications WHERE status = 'Rejected'")->fetchColumn();

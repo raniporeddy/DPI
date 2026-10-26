@@ -9,9 +9,6 @@ require_once __DIR__ . '/includes/header.php';
 <!-- Hero Banner Section -->
 <section class="hero-banner text-center">
     <div class="container">
-        <span class="badge bg-warning text-dark px-3 py-2 rounded-pill fs-7 mb-3 fw-bold shadow-sm">
-            <i class="fas fa-university me-1"></i> Academic Project Prototype
-        </span>
         <h1 class="hero-title">Digital Investor Onboarding System</h1>
         <p class="hero-subtitle">
             A complete paperless investor onboarding platform integrating Single Sign-On (SSO), Demo eKYC identity verification, HTML5 Canvas eSign digital signatures, and a centralized Paperless Office repository.

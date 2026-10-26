@@ -53,6 +53,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmtApp = $pdo->prepare("UPDATE applications SET status = 'Rejected', reviewed_at = NOW(), admin_remarks = ? WHERE user_id = ?");
                 $stmtApp->execute([$adminRemarks, $targetUserId]);
                 $msg = "Investor application REJECTED.";
+
+            } elseif ($actionType === 'correct_kyc') {
+                $correctedName    = trim($_POST['corrected_full_name'] ?? '');
+                $correctedDob     = trim($_POST['corrected_dob'] ?? '');
+                $correctedGender  = trim($_POST['corrected_gender'] ?? '');
+                $correctedIdNum   = trim($_POST['corrected_id_number'] ?? '');
+                $correctedAddress = trim($_POST['corrected_address'] ?? '');
+                $andVerify        = !empty($_POST['and_verify']) && $_POST['and_verify'] === '1';
+
+                $newKycStatus = $andVerify ? 'Verified' : 'Submitted';
+                $verifiedAt   = $andVerify ? date('Y-m-d H:i:s') : null;
+
+                $stmtKyc = $pdo->prepare("
+                    UPDATE kyc_verification 
+                    SET full_name = ?, dob = ?, id_number = ?, address = ?,
+                        ocr_name = ?, ocr_dob = ?, ocr_gender = ?, ocr_id_number = ?, ocr_address = ?,
+                        status = ?, admin_remarks = ?, verified_at = ?
+                    WHERE user_id = ?
+                ");
+                $stmtKyc->execute([
+                    $correctedName, $correctedDob, $correctedIdNum, $correctedAddress,
+                    $correctedName, $correctedDob, $correctedGender, $correctedIdNum, $correctedAddress,
+                    $newKycStatus, $adminRemarks, $verifiedAt, $targetUserId
+                ]);
+
+                // Also keep profile synced with reviewer-verified details
+                $stmtProf = $pdo->prepare("
+                    UPDATE investor_profiles 
+                    SET full_name = ?, dob = ?, gender = ?, id_number = ?, address = ?, updated_at = NOW() 
+                    WHERE user_id = ?
+                ");
+                $stmtProf->execute([$correctedName, $correctedDob, $correctedGender ?: null, $correctedIdNum, $correctedAddress, $targetUserId]);
+
+                $msg = $andVerify ? "eKYC details corrected and marked as Verified." : "eKYC details corrected successfully by authorized reviewer.";
+
+            } elseif ($actionType === 'reset_kyc_for_resubmission') {
+                // -------------------------------------------------------------------
+                // RESET KYC FOR RESUBMISSION
+                // Rejects the mismatched submission and clears the document / OCR
+                // pointers so the investor can re-upload their own identity document.
+                //
+                // Security guarantees:
+                //   - Only admin can trigger this (requireAdmin() enforced above).
+                //   - Original uploaded files are NOT deleted from disk — they stay
+                //     for audit purposes. Only the DB pointers are cleared.
+                //   - Investor profile fields (name, DOB, gender) are NOT modified.
+                //   - The investor cannot clear their own row; they can only REQUEST.
+                // -------------------------------------------------------------------
+                $rejectionReason = !empty($adminRemarks)
+                    ? $adminRemarks
+                    : 'Document rejected by administrator: the uploaded document does not match the investor account. Please resubmit your own valid identity document.';
+
+                $stmtReset = $pdo->prepare("
+                    UPDATE kyc_verification
+                    SET status        = 'Rejected',
+                        document_path = NULL,
+                        photo_path    = NULL,
+                        ocr_name      = NULL,
+                        ocr_dob       = NULL,
+                        ocr_gender    = NULL,
+                        ocr_address   = NULL,
+                        ocr_id_number = NULL,
+                        ocr_status    = NULL,
+                        admin_remarks = ?,
+                        verified_at   = NULL,
+                        updated_at    = NOW()
+                    WHERE user_id = ? AND status IN ('Submitted','Pending')
+                ");
+                $stmtReset->execute([$rejectionReason, $targetUserId]);
+
+                $msg = "eKYC submission rejected and reset. Investor can now resubmit their own document.";
             }
 
             // Insert into Audit Log
@@ -81,8 +152,7 @@ $stmtPending = $pdo->query("
     JOIN users u ON a.user_id = u.id
     LEFT JOIN investor_profiles p ON u.id = p.user_id
     LEFT JOIN kyc_verification k ON u.id = k.user_id
-    LEFT JOIN esignatures s ON u.id = s.user_id
-    WHERE a.status IN ('Submitted', 'Under Review') OR k.status = 'Submitted'
+    WHERE a.status IN ('Submitted', 'Under Review') OR (k.status IN ('Submitted', 'Pending') AND k.document_path IS NOT NULL)
     ORDER BY a.updated_at ASC
 ");
 $pendingQueue = $stmtPending->fetchAll();

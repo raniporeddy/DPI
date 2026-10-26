@@ -95,6 +95,7 @@ if (file_exists($sampleKycFile)) {
     echo "  -> Extracted Portrait Photo: " . ($procRes['photo_path'] ?: 'Photograph not detected') . "\n";
     echo "  -> Extracted Name: " . ($procRes['ocr_name'] ?: 'Not detected') . "\n";
     echo "  -> Extracted DOB: " . ($procRes['ocr_dob'] ?: 'Not detected') . "\n";
+    echo "  -> Extracted Gender: " . ($procRes['ocr_gender'] ?: 'Not detected') . "\n";
     echo "  -> Extracted ID Number: " . ($procRes['ocr_id_number'] ?: 'Not detected') . "\n";
     echo "  -> Extracted Address: " . ($procRes['ocr_address'] ?: 'Not detected') . "\n";
 
@@ -104,15 +105,16 @@ if (file_exists($sampleKycFile)) {
 
     $stmtKycUpd = $pdo->prepare("
         INSERT INTO kyc_verification 
-        (user_id, id_type, id_number, full_name, dob, address, ocr_name, ocr_dob, ocr_address, ocr_id_number, ocr_status, document_path, photo_path, status)
-        VALUES (?, 'Aadhaar', '1234-5678-9012', 'John Doe', '1994-08-22', '45 Park Street, Sector 4', ?, ?, ?, ?, ?, 'uploads/kyc/demo_aadhaar_card.png', ?, 'Submitted')
+        (user_id, id_type, id_number, full_name, dob, address, ocr_name, ocr_dob, ocr_gender, ocr_address, ocr_id_number, ocr_status, document_path, photo_path, status)
+        VALUES (?, 'Aadhaar', '1234-5678-9012', 'John Doe', '1994-08-22', '45 Park Street, Sector 4', ?, ?, ?, ?, ?, ?, 'uploads/kyc/demo_aadhaar_card.png', ?, 'Submitted')
         ON DUPLICATE KEY UPDATE 
-        ocr_name=VALUES(ocr_name), ocr_dob=VALUES(ocr_dob), ocr_address=VALUES(ocr_address), ocr_id_number=VALUES(ocr_id_number), photo_path=VALUES(photo_path), status='Submitted'
+        ocr_name=VALUES(ocr_name), ocr_dob=VALUES(ocr_dob), ocr_gender=VALUES(ocr_gender), ocr_address=VALUES(ocr_address), ocr_id_number=VALUES(ocr_id_number), photo_path=VALUES(photo_path), status='Submitted'
     ");
     $stmtKycUpd->execute([
         $investorUser['id'],
         $procRes['ocr_name'] ?? null,
         $procRes['ocr_dob'] ?? null,
+        $procRes['ocr_gender'] ?? null,
         $procRes['ocr_address'] ?? null,
         $procRes['ocr_id_number'] ?? null,
         $procRes['ocr_status'] ?? 'Processed',

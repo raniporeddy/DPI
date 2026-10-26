@@ -101,42 +101,6 @@ require_once __DIR__ . '/../includes/header.php';
                 </div>
             <?php endif; ?>
 
-            <!-- Verified Aadhaar Profile Photo Banner -->
-            <div class="card bg-white border border-2 border-primary-subtle shadow-sm rounded-4 p-3 mb-4">
-                <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
-                    <div class="d-flex align-items-center gap-3">
-                        <?php if ($hasVerifiedPhoto): ?>
-                            <div class="position-relative">
-                                <img src="/digital-investor/<?php echo e($kyc['photo_path']); ?>" alt="Aadhaar Verified Photo" style="width: 72px; height: 88px; object-fit: cover; object-position: center;" class="rounded-3 border shadow-sm">
-                                <?php if (($kyc['status'] ?? '') === 'Verified'): ?>
-                                    <span class="position-absolute top-0 start-100 translate-middle badge rounded-circle bg-success border border-white p-1" title="Verified Photo">
-                                        <i class="fas fa-check"></i>
-                                    </span>
-                                <?php endif; ?>
-                            </div>
-                        <?php else: ?>
-                            <div class="bg-light text-secondary rounded-3 d-flex align-items-center justify-content-center border" style="width: 72px; height: 88px;">
-                                <i class="fas fa-user-circle fs-1 text-muted"></i>
-                            </div>
-                        <?php endif; ?>
-                        <div>
-                            <h5 class="fw-bold mb-1 text-dark"><?php echo e($profile['full_name'] ?? $_SESSION['email']); ?></h5>
-                            <span class="text-muted small d-block">Investor Account ID: <code>#<?php echo e($userId); ?></code></span>
-                            <?php if ($hasVerifiedPhoto): ?>
-                                <span class="badge bg-success-subtle text-success border border-success mt-1"><i class="fas fa-id-card me-1"></i> Aadhaar Photo Attached</span>
-                            <?php else: ?>
-                                <span class="badge bg-secondary mt-1"><i class="fas fa-info-circle me-1"></i> Default Profile Avatar (eKYC Photo Pending)</span>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                    <div>
-                        <a href="/digital-investor/investor/ekyc.php" class="btn btn-outline-primary btn-sm fw-semibold">
-                            <i class="fas fa-id-card me-1"></i> Manage eKYC Document
-                        </a>
-                    </div>
-                </div>
-            </div>
-
             <div class="card shadow-sm border-0 rounded-4 mb-4">
                 <div class="card-header bg-white py-3 border-bottom d-flex align-items-center justify-content-between">
                     <h4 class="fw-bold mb-0 text-primary"><i class="fas fa-user-edit me-2"></i>Investor Profile Form</h4>
